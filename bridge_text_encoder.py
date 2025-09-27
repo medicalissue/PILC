@@ -11,7 +11,7 @@ class BridgeTextEncoder(nn.Module):
     
     def __init__(self, 
                  num_latent_tokens=64, 
-                 embed_dim=32,  # ← 32차원!
+                 embed_dim=64,  # ← 32차원!
                  freeze_clip=True):
         super().__init__()
         

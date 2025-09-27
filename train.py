@@ -11,11 +11,10 @@ import wandb
 
 # 프로젝트 imports
 from tokenizer import SoftVQModel, ModelArgs
-from contrastive_losses import combined_loss
+from contrastive_losses import PerceptualLoss, combined_loss
 from dataloader import create_dataloader
 
-
-def train_epoch(model, dataloader, optimizer, device, epoch, log_interval=50, global_step_start=0):
+def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, attnpool, log_interval=50, global_step_start=0):
     """한 에폭 학습 + wandb 로깅"""
     model.train()
 
@@ -43,9 +42,13 @@ def train_epoch(model, dataloader, optimizer, device, epoch, log_interval=50, gl
         loss, loss_dict = combined_loss(
             output,
             images,
+            perceptual_loss=perceptual_loss,
+            device=device,
             contrastive_weight=0.1,
+            perceptual_weight=1.0,
             temperature=0.07,
-            logit_scale_param=model.logit_scale
+            logit_scale_param=model.logit_scale,
+            attnpool=attnpool
         )
 
         # Backward
@@ -87,7 +90,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, log_interval=50, gl
     return avg_metrics, global_step
 
 
-def evaluate_model(model, dataloader, device, epoch=None, global_step=None):
+def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, attnpool=None, global_step=None):
     """검증 + wandb 로깅"""
     model.eval()
 
@@ -104,8 +107,11 @@ def evaluate_model(model, dataloader, device, epoch=None, global_step=None):
             _, loss_dict = combined_loss(
                 output,
                 images,
+                perceptual_loss=perceptual_loss,
+                device=device,
                 contrastive_weight=0.1,
                 temperature=0.07,  # train과 동일 기준
+                attnpool=attnpool
             )
 
             for k, v in loss_dict.items():
@@ -137,7 +143,7 @@ def main():
     parser.add_argument('--wandb_project', type=str, default='PILC')
     parser.add_argument('--wandb_run_name', type=str, default='base')
     parser.add_argument('--wandb_entity', type=str, default='medicalissues')
-    parser.add_argument('--device', type=str, default=None)  # 'cuda', 'cuda:1', 'cpu' 등
+    parser.add_argument('--device', type=str, default='cuda:2')  # 'cuda', 'cuda:1', 'cpu' 등
 
     args = parser.parse_args()
 
@@ -155,14 +161,14 @@ def main():
     if args.device is not None:
         device = torch.device(args.device)
     else:
-        device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     # 모델 생성
     model_args = ModelArgs(
         image_size=256,
-        codebook_size=1024,
-        codebook_embed_dim=32,
+        codebook_size=16384,
+        codebook_embed_dim=64,
         num_latent_tokens=64,
         enc_type='vit',
         encoder_model='vit_small_patch14_dinov2.lvd142m',
@@ -172,6 +178,9 @@ def main():
 
     model = SoftVQModel(model_args)
     model.to(device)
+
+    perceptual_loss = PerceptualLoss(device=device)
+    attnpool = SoftVQModel.AttnPool(dim=model_args.codebook_embed_dim)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
@@ -199,7 +208,7 @@ def main():
         model.parameters(),
         lr=args.lr,
         weight_decay=0.01,
-        betas=(0.9, 0.999),
+        betas=(0.9, 0.98),
         eps=1e-8
     )
 
@@ -216,13 +225,13 @@ def main():
 
         # Train
         train_metrics, global_step = train_epoch(
-            model, train_loader, optimizer, device, epoch,
+            model, train_loader, optimizer, device, epoch, perceptual_loss, attnpool,
             log_interval=args.log_interval, global_step_start=global_step
         )
 
         # Val
         val_metrics = evaluate_model(
-            model, val_loader, device, epoch=epoch, global_step=global_step
+            model, val_loader, device, epoch, perceptual_loss, attnpool, global_step=global_step
         )
 
         # 콘솔 요약
