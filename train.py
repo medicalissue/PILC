@@ -11,13 +11,14 @@ import wandb
 
 # 프로젝트 imports
 from tokenizer import SoftVQModel, ModelArgs
-from contrastive_losses import PerceptualLoss, combined_loss
+from contrastive_losses import PerceptualLoss, CombinedLoss
 from dataloader import create_dataloader
 
-def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, log_interval=50, global_step_start=0):
+def train_epoch(model, dataloader, optimizer_g, optimizer_d, device, epoch, loss_fn, log_interval=50, global_step_start=0):
     """한 에폭 학습 + wandb 로깅"""
     model.train()
-
+    loss_fn.discriminator.train()
+    
     total_loss = 0.0
     total_metrics = {}
     num_batches = 0
@@ -31,7 +32,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, lo
         if torch.is_tensor(texts):
             texts = texts.to(device)
 
-        optimizer.zero_grad()
+        optimizer_g.zero_grad()
 
         # Forward
         output = model(images, texts)
@@ -39,24 +40,45 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, lo
         # ⚠️ sanity 단계: temperature는 0.07 상수 권장
         #  - 나중에 learnable logit_scale 쓰려면 combined_loss/contrastive_loss에서
         #    logits = sim * logit_scale.exp() 구조로 바꿔주세요 (아래 '추가 패치' 참고).
-        loss, loss_dict = combined_loss(
+        loss_g, loss_dict_g = loss_fn(
             output,
             images,
-            perceptual_loss=perceptual_loss,
-            device=device,
-            contrastive_weight=0.1,
-            perceptual_weight=1.0,
-            temperature=0.07,
-            logit_scale_param=model.logit_scale
+            logit_scale_param=model.logit_scale,
+            global_step=global_step,
+            optimizer_idx=0,
         )
 
         # Backward
-        loss.backward()
-        optimizer.step()
-
+        loss_g.backward()
+        optimizer_g.step()
+        
+        
+        optimizer_d.zero_grad()
+        
+        with torch.no_grad():
+            output_d = model(images, texts)
+        
+        loss_d, loss_dict_d = loss_fn(
+            output_d,
+            images,
+            logit_scale_param=model.logit_scale,
+            global_step=global_step,
+            optimizer_idx=1  # Discriminator 모드
+        )
+        
+        loss_d.backward()
+        optimizer_d.step()
+        
         # 누적
-        total_loss += float(loss.item())
-        for k, v in loss_dict.items():
+        total_loss += float(loss_g.item())
+        
+        combined_loss_dict = {}
+        for k, v in loss_dict_g.items():
+            combined_loss_dict[f"gen_{k}"] = v
+        for k, v in loss_dict_d.items():
+            combined_loss_dict[f"disc_{k}"] = v
+        
+        for k, v in combined_loss_dict.items():
             total_metrics[k] = total_metrics.get(k, 0.0) + float(v)
 
         num_batches += 1
@@ -69,12 +91,15 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, lo
         # 진행바 & 주기적 wandb 로깅
         if (batch_idx + 1) % log_interval == 0:
             pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                't2i_acc': f"{loss_dict.get('t2i_acc', 0.0):.3f}",
-                'i2t_acc': f"{loss_dict.get('i2t_acc', 0.0):.3f}",
-                'cont': f"{loss_dict.get('contrastive_loss', 0.0):.3f}",
+                'g_loss': f"{loss_g.item():.4f}",
+                'd_loss': f"{loss_d.item():.4f}",
+                't2i_acc': f"{loss_dict_g.get('t2i_acc', 0.0):.3f}",
+                'i2t_acc': f"{loss_dict_g.get('i2t_acc', 0.0):.3f}",
             })
-            log_data = {f"train/{k}": v for k, v in loss_dict.items()}
+            
+            log_data = {f"train/{k}": v for k, v in combined_loss_dict.items()}
+            log_data["train/gen_total_loss"] = loss_g.item()
+            log_data["train/disc_total_loss"] = loss_d.item()
 
                 # logit_scale이 있으면 exp() 값도 기록
             if hasattr(model, "logit_scale"):
@@ -88,10 +113,11 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, lo
     return avg_metrics, global_step
 
 
-def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, global_step=None):
+def evaluate_model(model, dataloader, device, loss_fn, epoch=None, global_step=None):
     """검증 + wandb 로깅"""
     model.eval()
-
+    loss_fn.discriminator.eval()
+    
     total_metrics = {}
     num_batches = 0
 
@@ -102,13 +128,13 @@ def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, 
                 texts = texts.to(device)
 
             output = model(images, texts)
-            _, loss_dict = combined_loss(
+            
+            _, loss_dict = loss_fn(
                 output,
                 images,
-                perceptual_loss=perceptual_loss,
-                device=device,
-                contrastive_weight=0.1,
-                temperature=0.07,  # train과 동일 기준
+                logit_scale_param=model.logit_scale,
+                global_step=global_step,
+                optimizer_idx=0
             )
 
             for k, v in loss_dict.items():
@@ -130,18 +156,24 @@ def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, 
 
 
 def main():
+    date = datetime.strftime(datetime.now(), '%Y%m%d_%H:%M:%S')
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr_g', type=float, default=1e-4, help='Generator learning rate (TTUR)')
+    parser.add_argument('--lr_d', type=float, default=4e-4, help='Discriminator learning rate (TTUR - usually 4x generator)')
     parser.add_argument('--dataset_size', type=int, default=1000)
-    parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--save_dir', type=str, default=f'./checkpoints/{date}')
     parser.add_argument('--log_interval', type=int, default=100)
     parser.add_argument('--wandb_project', type=str, default='PILC')
     parser.add_argument('--wandb_run_name', type=str, default='base')
     parser.add_argument('--wandb_entity', type=str, default='medicalissues')
     parser.add_argument('--device', type=str, default='cuda:2')  # 'cuda', 'cuda:1', 'cpu' 등
-
+    
+    parser.add_argument('--disc_start', type=int, default=0, help='Discriminator 시작 step')
+    parser.add_argument('--disc_weight', type=float, default=1.0, help='Discriminator loss weight')
+    parser.add_argument('--lecam_loss_weight', type=float, default=0.001, help='LeCAM loss weight')
+    parser.add_argument('--disc_cr_loss_weight', type=float, default=1.0, help='Discriminator consistency regularization weight')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -199,10 +231,31 @@ def main():
         batch_size=args.batch_size
     )
 
+    loss_fn = CombinedLoss(
+        rec_weight=1.0,
+        contrastive_weight=0.1,
+        perceptual_weight=2.0,
+        perceptual_loss=perceptual_loss,
+        lecam_loss_weight=args.lecam_loss_weight,
+        disc_start=args.disc_start,
+        disc_weight=args.disc_weight,
+        disc_cr_loss_weight=args.disc_cr_loss_weight,
+        temperature=0.07,
+        pool="mean"
+    ).to(device)
+
     # Optimizer
-    optimizer = torch.optim.AdamW(
+    optimizer_g = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
+        lr=args.lr_g,
+        weight_decay=0.01,
+        betas=(0.9, 0.98),
+        eps=1e-8
+    )
+    
+    optimizer_d = torch.optim.AdamW(
+        loss_fn.discriminator.parameters(),
+        lr=args.lr_d,
         weight_decay=0.01,
         betas=(0.9, 0.98),
         eps=1e-8
@@ -221,19 +274,20 @@ def main():
 
         # Train
         train_metrics, global_step = train_epoch(
-            model, train_loader, optimizer, device, epoch, perceptual_loss,
+            model, train_loader, optimizer_g, optimizer_d, device, epoch, loss_fn,
             log_interval=args.log_interval, global_step_start=global_step
         )
 
         # Val
         val_metrics = evaluate_model(
-            model, val_loader, device, epoch, perceptual_loss, global_step=global_step
+            model, val_loader, device, loss_fn, epoch=epoch, global_step=global_step
         )
 
         # 콘솔 요약
-        print(f"Train Loss: {train_metrics.get('epoch_loss', 0.0):.4f}")
-        print(f"Train T2I Acc: {train_metrics.get('t2i_acc', 0.0):.4f}")
-        print(f"Train I2T Acc: {train_metrics.get('i2t_acc', 0.0):.4f}")
+        print(f"Train Gen Loss: {train_metrics.get('gen_total_loss', 0.0):.4f}")
+        print(f"Train Disc Loss: {train_metrics.get('disc_discriminator_adv_loss', 0.0):.4f}")
+        print(f"Train T2I Acc: {train_metrics.get('gen_t2i_acc', 0.0):.4f}")
+        print(f"Train I2T Acc: {train_metrics.get('gen_i2t_acc', 0.0):.4f}")
         print(f"Val   Loss: {val_metrics.get('total_loss', 0.0):.4f}")
         print(f"Val   T2I Acc: {val_metrics.get('t2i_acc', 0.0):.4f}")
         print(f"Val   I2T Acc: {val_metrics.get('i2t_acc', 0.0):.4f}")
@@ -253,9 +307,12 @@ def main():
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                'discriminator_state_dict': loss_fn.discriminator.state_dict(),
+                'optimizer_g_state_dict': optimizer_g.state_dict(),
+                'optimizer_d_state_dict': optimizer_d.state_dict(),
                 'train_history': train_history,
-                'args': vars(model_args)
+                'args': vars(args),
+                'model_args': vars(model_args)
             }, ckpt_path)
             print(f"✅ Checkpoint saved: {ckpt_path}")
 
@@ -263,8 +320,10 @@ def main():
     final_path = os.path.join(args.save_dir, 'final_model.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
+        'discriminator_state_dict': loss_fn.discriminator.state_dict(),
         'train_history': train_history,
-        'args': model_args
+        'args': args,
+        'model_args': model_args
     }, final_path)
 
     # 로그 JSON 저장

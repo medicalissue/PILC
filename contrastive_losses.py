@@ -11,6 +11,16 @@ def adopt_weight(weight, global_step, threshold=0, value=0.):
         weight = value
     return weight
 
+def hinge_d_loss(logits_real, logits_fake):
+    loss_real = torch.mean(F.relu(1. - logits_real))
+    loss_fake = torch.mean(F.relu(1. + logits_fake))
+    d_loss = 0.5 * (loss_real + loss_fake)
+    return d_loss
+
+def hinge_gen_loss(logit_fake):
+    return -torch.mean(logit_fake)        
+
+
 class ContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.07, pool="mean", eps=1e-8):
         super().__init__()
@@ -26,15 +36,22 @@ class ContrastiveLoss(nn.Module):
           제공되면 temperature는 무시됨.
         """
         
-        # 3) 유사도 & 로그릿 (fp32)
-        sim_token = F.cosine_similarity(text_tokens, visual_tokens, dim=-1).float()  # [B, B]
-        sim = torch.sum(sim_token * F.softmax(sim_token, dim=1), dim=1)  # [batch]
+        # 모든 배치 쌍에 대해 토큰별 유사도 계산
+        # text_tokens[i]와 visual_tokens[j]의 토큰별 유사도
+        text_expanded = text_tokens.unsqueeze(1)  # [B, 1, T, D]
+        visual_expanded = visual_tokens.unsqueeze(0)  # [1, B, T, D]
         
+        # 배치 간 같은 위치 토큰들의 코사인 유사도: [B, B, T]
+        batch_token_similarities = F.cosine_similarity(text_expanded, visual_expanded, dim=-1)  # [B, B, T]
+        
+        # 각 (i,j) 쌍에 대해 softmax 가중합: [B, B, T] -> [B, B]
+        batch_softmax_weights = F.softmax(batch_token_similarities, dim=-1)  # [B, B, T]
+        sim = torch.sum(batch_token_similarities * batch_softmax_weights, dim=-1)  # [B, B]
+        
+        # Temperature/logit_scale 적용
         if logit_scale_param is not None:
-            # CLIP 방식: logits = sim * exp(logit_scale)
             logits = sim * logit_scale_param.exp().clamp(max=100).float()
         else:
-            # 고정 온도: logits = sim / T
             logits = sim / float(self.temperature)
 
         # 4) 라벨
@@ -98,7 +115,10 @@ def lecam_reg(real_pred, fake_pred, lecam_ema):
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, rec_weight = None, perceptual_loss=None, contrastive_weight=0.1, perceptual_weight=1.0, lecam_loss_weight=None, temperature=0.07, disc_start=None, pool="mean"):
+    def __init__(self, rec_weight = None, perceptual_loss=None, contrastive_weight=0.1,
+                 perceptual_weight=1.0, lecam_loss_weight=None, temperature=0.07,
+                 disc_start=None, disc_weight=None, disc_cr_loss_weight=None,
+                 pool="mean"):
         super().__init__()
         self.contrastive_weight = contrastive_weight
         self.temperature = temperature
@@ -111,21 +131,20 @@ class CombinedLoss(nn.Module):
         self.perceptual_loss = perceptual_loss
         self.perceptual_weight = perceptual_weight
         
-        self.disc_start = disc_start
+        self.discriminator = PatchGANDiscriminator(
+            input_nc=3, 
+            n_layers=3,
+            ndf=64,
+        )
         
+        self.disc_start = disc_start
+        self.disc_weight = disc_weight
+        self.disc_cr_loss_weight = disc_cr_loss_weight
         self.lecam_loss_weight = lecam_loss_weight
         self.lecam_ema = LeCAM_EMA()
         
-    def hinge_d_loss(logits_real, logits_fake):
-        loss_real = torch.mean(F.relu(1. - logits_real))
-        loss_fake = torch.mean(F.relu(1. + logits_fake))
-        d_loss = 0.5 * (loss_real + loss_fake)
-        return d_loss
-    
-    def hinge_gen_loss(logit_fake):
-        return -torch.mean(logit_fake)        
-
-    def forward(self, model_output, target_images, logit_scale_param=None, global_step=None, optimizer_idx=0):
+    def forward(self, model_output, target_images, logit_scale_param=None,
+                global_step=None, optimizer_idx=0):
         """
         SoftVQ-VAE용 총손실
         - model_output: {
@@ -146,20 +165,16 @@ class CombinedLoss(nn.Module):
                 text_tok, visual_tok,
                 logit_scale_param=logit_scale_param
         )
-        loss_dict.update(contr_metrics)
         
         # 3) perceptual loss
         percep_loss = self.perceptual_loss(target_images, model_output["reconstructed"])
         percep_loss = torch.mean(percep_loss)
-        loss_dict["percep_loss"] = percep_loss.item()
                 
-                
-        self.disc_loss = self.hinge_d_loss
+        self.disc_loss = hinge_d_loss
         self.discriminator_iter_start = self.disc_start
-        self.disc_weight = disc_weight
-        self.gen_adv_loss = self.hinge_gen_loss
+        self.gen_adv_loss = hinge_gen_loss
         
-        reconstructions = DiffAugment(reconstructions.contiguous(), policy='color,translation,cutout_0.2', prob=0.5)
+        reconstructions = DiffAugment(model_output["reconstructed"], policy='color,translation,cutout_0.2', prob=0.5)
         logits_fake = self.discriminator(reconstructions.contiguous())
         generator_adv_loss = self.gen_adv_loss(logits_fake)
         
@@ -192,8 +207,7 @@ class CombinedLoss(nn.Module):
             d_cr = F.mse_loss(torch.cat([logits_real, logits_fake], dim=0), torch.cat([logits_real_s, logits_fake_s])) * disc_cr_loss_weight
             d_adversarial_loss += d_cr
             
-            loss_dict = {"discriminator_adv_loss": d_adversarial_loss, "disc_weight": disc_weight, "discriminator_cr_loss": d_cr,
-                         "logits_real": logits_real, "logits_fake": logits_fake}
+            loss_dict = {"discriminator_adv_loss": d_adversarial_loss.item(), "disc_weight": disc_weight, "discriminator_cr_loss": d_cr.item()}
 
             return d_adversarial_loss, loss_dict
 
