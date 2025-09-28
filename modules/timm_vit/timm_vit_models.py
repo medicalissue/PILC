@@ -227,7 +227,7 @@ class TimmViTDecoder(nn.Module):
     def __init__(self, in_channels=3,
                  model_name='vit_small_patch14_dinov2.lvd142m',
                  model_kwargs={'img_size': 224, 'patch_size': 14, 'drop_path_rate': 0.0}, pretrained=True,
-                 tuning_method='lora', tuning_kwargs={'r': 8},
+                 tuning_method='full', tuning_kwargs={'r': 8},
                  num_latent_tokens=32, to_pixel='linear',
                  codebook_embed_dim=32,
                  rope_theta=100.0, rope_mixed=False, use_rope=False, use_ape=True,
@@ -256,7 +256,13 @@ class TimmViTDecoder(nn.Module):
             # doing nothing
             self.model = model
         elif tuning_method == 'lora':
-            config = peft.LoraConfig(target_modules=r".*\.mlp\.fc\d",
+            config = peft.LoraConfig(target_modules=[
+                                        r".*\.mlp\.fc\d",
+                                        r".*\.attn\.qkv",
+                                        r".*\.attn\.q_proj",
+                                        r".*\.attn\.k_proj", 
+                                        r".*\.attn\.v_proj",
+                                        r".*\.attn\.proj",],
                                      modules_to_save=['patch_embed.proj', 'patch_embed.norm', 'norm'], **tuning_kwargs)
             self.model = peft.get_peft_model(model, config)
             # self.model.base_model.model.pos_embed.requires_grad = True

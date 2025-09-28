@@ -3,20 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 from lpips import LPIPS
-
-def _pool_tokens(tokens, mode="mean"):
-    # tokens: [B, T, D] 또는 이미 [B, D]
-    if tokens.dim() == 3:
-        if mode == "mean":
-            return tokens.mean(dim=1)  # [B, D]
-        elif mode == "cls":            # 필요 시 확장
-            return tokens[:, 0]
-        else:
-            raise ValueError(f"Unknown pool mode: {mode}")
-    elif tokens.dim() == 2:
-        return tokens
-    else:
-        raise ValueError(f"tokens shape not supported: {tokens.shape}")
+from discriminators import PatchGANDiscriminator
 
 class ContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.07, pool="mean", eps=1e-8):
@@ -87,13 +74,39 @@ class PerceptualLoss(nn.Module):
     def forward(self, real_image, reconstruction):
         return self.perceptual_loss(real_image, reconstruction)
 
+# class AdversarialLoss(nn.Module):
+#     def __init__(self, device):
+#         self.discriminator = PatchGANDiscriminator(
+#             input_nc=disc_in_channels, 
+#             n_layers=disc_num_layers,
+#             ndf=disc_dim,
+#         )
+        
+#         def hinge_d_loss(logits_real, logits_fake):
+#             loss_real = torch.mean(F.relu(1. - logits_real))
+#             loss_fake = torch.mean(F.relu(1. + logits_fake))
+#             d_loss = 0.5 * (loss_real + loss_fake)
+#             return d_loss
+        
+#         def hinge_gen_loss(logit_fake):
+#             return -torch.mean(logit_fake)
+        
+#         self.disc_loss = hinge_d_loss
+        
+#         self.discriminator_iter_start = disc_start
+#         self.disc_weight = disc_weight
+#         self.disc_adaptive_weight = disc_adaptive_weight
+
+#         self.gen_adv_loss = hinge_gen_loss
+        
+
+
 class CombinedLoss(nn.Module):
-    def __init__(self, device, perceptual_loss=None, contrastive_weight=0.1, perceptual_weight=1.0, temperature=0.07, pool="mean", attnpool = None):
+    def __init__(self, device, perceptual_loss=None, contrastive_weight=0.1, perceptual_weight=1.0, temperature=0.07, pool="mean"):
         super().__init__()
         self.contrastive_weight = contrastive_weight
         self.temperature = temperature
         self.pool = pool
-        self.attnpool = attnpool.to(device)
         self.contrastive_loss = ContrastiveLoss(temperature=temperature, pool=pool)
         self.perceptual_loss = perceptual_loss
         self.perceptual_weight = perceptual_weight
@@ -118,7 +131,6 @@ class CombinedLoss(nn.Module):
         visual_tok = model_output.get("visual_tokens", None)
         contr_loss, contr_metrics = self.contrastive_loss(
                 text_tok, visual_tok,
-                attnpool=self.attnpool,
                 logit_scale_param=logit_scale_param
         )
         loss_dict.update(contr_metrics)
@@ -127,7 +139,7 @@ class CombinedLoss(nn.Module):
         percep_loss = self.perceptual_loss(target_images, model_output["reconstructed"])
         percep_loss = torch.mean(percep_loss)
         loss_dict["percep_loss"] = percep_loss.item()
-
+                
         # 3) 합계
         total = recon + self.contrastive_weight * contr_loss + self.perceptual_weight * percep_loss
         loss_dict["total_loss"] = total.item()
