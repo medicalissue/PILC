@@ -14,7 +14,7 @@ from tokenizer import SoftVQModel, ModelArgs
 from contrastive_losses import PerceptualLoss, combined_loss
 from dataloader import create_dataloader
 
-def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, attnpool, log_interval=50, global_step_start=0):
+def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, log_interval=50, global_step_start=0):
     """한 에폭 학습 + wandb 로깅"""
     model.train()
 
@@ -47,8 +47,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, at
             contrastive_weight=0.1,
             perceptual_weight=1.0,
             temperature=0.07,
-            logit_scale_param=model.logit_scale,
-            attnpool=attnpool
+            logit_scale_param=model.logit_scale
         )
 
         # Backward
@@ -75,7 +74,6 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, at
                 'i2t_acc': f"{loss_dict.get('i2t_acc', 0.0):.3f}",
                 'cont': f"{loss_dict.get('contrastive_loss', 0.0):.3f}",
             })
-
             log_data = {f"train/{k}": v for k, v in loss_dict.items()}
 
                 # logit_scale이 있으면 exp() 값도 기록
@@ -90,7 +88,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, perceptual_loss, at
     return avg_metrics, global_step
 
 
-def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, attnpool=None, global_step=None):
+def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, global_step=None):
     """검증 + wandb 로깅"""
     model.eval()
 
@@ -111,7 +109,6 @@ def evaluate_model(model, dataloader, device, epoch=None, perceptual_loss=None, 
                 device=device,
                 contrastive_weight=0.1,
                 temperature=0.07,  # train과 동일 기준
-                attnpool=attnpool
             )
 
             for k, v in loss_dict.items():
@@ -169,7 +166,7 @@ def main():
         image_size=256,
         codebook_size=16384,
         codebook_embed_dim=64,
-        num_latent_tokens=64,
+        num_latent_tokens=32,
         enc_type='vit',
         encoder_model='vit_small_patch14_dinov2.lvd142m',
         dec_type='vit',
@@ -180,7 +177,6 @@ def main():
     model.to(device)
 
     perceptual_loss = PerceptualLoss(device=device)
-    attnpool = SoftVQModel.AttnPool(dim=model_args.codebook_embed_dim)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
@@ -225,13 +221,13 @@ def main():
 
         # Train
         train_metrics, global_step = train_epoch(
-            model, train_loader, optimizer, device, epoch, perceptual_loss, attnpool,
+            model, train_loader, optimizer, device, epoch, perceptual_loss,
             log_interval=args.log_interval, global_step_start=global_step
         )
 
         # Val
         val_metrics = evaluate_model(
-            model, val_loader, device, epoch, perceptual_loss, attnpool, global_step=global_step
+            model, val_loader, device, epoch, perceptual_loss, global_step=global_step
         )
 
         # 콘솔 요약

@@ -194,17 +194,7 @@ class VQModel(nn.Module, PyTorchModelHubMixin):
         self.quantize = VectorQuantizer(config.codebook_size, config.codebook_embed_dim, 
                                         config.commit_loss_beta, config.entropy_loss_ratio,
                                         config.codebook_l2_norm, config.codebook_show_usage)
-    class AttnPool(nn.Module):
-        def __init__(self, dim, heads=4, dropout=0.0):
-            super().__init__()
-            self.q = nn.Parameter(torch.randn(1, 1, dim) * 0.02)  # learnable query
-            self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, dropout=dropout, batch_first=True)
-            self.out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
 
-        def forward(self, x):  # x: [B, T, D]
-            q = self.q.expand(x.size(0), -1, -1)      # [B,1,D]
-            y, _ = self.attn(q, x, x)                 # [B,1,D]
-            return self.out(y.squeeze(1))             # [B,D]
     def encode(self, x):
         h = self.encoder(x)
         h = self.quant_conv(h)
@@ -268,17 +258,6 @@ class VQModel(nn.Module, PyTorchModelHubMixin):
         dec = self.decode(quant, x=input, h=h, w=w)
         return dec, diff, info
 
-class AttnPool(nn.Module):
-    def __init__(self, dim, heads=4, dropout=0.0):
-        super().__init__()
-        self.q = nn.Parameter(torch.randn(1, 1, dim) * 0.02)  # learnable query
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, dropout=dropout, batch_first=True)
-        self.out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
-
-    def forward(self, x):  # x: [B, T, D]
-        q = self.q.expand(x.size(0), -1, -1)      # [B,1,D]
-        y, _ = self.attn(q, x, x)                 # [B,1,D]
-        return self.out(y.squeeze(1))             # [B,D]
 
 class SoftVQModel(VQModel, PyTorchModelHubMixin):
     def __init__(self, config: ModelArgs, 
@@ -343,37 +322,6 @@ class SoftVQModel(VQModel, PyTorchModelHubMixin):
         # 기존 decode 함수 사용
         dec, _, _ = self.decode(latent_tokens, None, None)  
         return dec
-    
-    def compute_text_image_similarity(self, text_tokens, visual_tokens):
-        text_features = self.attnpool(text_tokens)    # [batch, embed_dim]
-        visual_features = self.attnpool(visual_tokens)   # [batch, embed_dim]
-        
-        # L2 정규화
-        text_norm = F.normalize(text_features, dim=-1)
-        visual_norm = F.normalize(visual_features, dim=-1)
-        
-        # 코사인 유사도
-        similarities = torch.sum(text_norm * visual_norm, dim=-1)  # [batch]
-        
-        return similarities
-    
-    def cross_modal_retrieval(self, query_tokens, database_tokens, mode='text2image'):
-        """Cross-modal retrieval (텍스트→이미지 또는 이미지→텍스트)"""
-        # Global pooling & 정규화
-        query_features = F.normalize(self.attnpool(query_tokens))     # [N, embed_dim]
-        database_features = F.normalize(self.attnpool(database_tokens)) # [M, embed_dim]
-        
-        # 유사도 행렬
-        similarity_matrix = torch.matmul(query_features, database_features.T)  # [N, M]
-        
-        # Top-K 검색
-        top_similarities, top_indices = similarity_matrix.topk(k=min(10, similarity_matrix.size(1)), dim=1)
-        
-        return {
-            'similarities': top_similarities,
-            'indices': top_indices,
-            'similarity_matrix': similarity_matrix
-        }
     
     def forward(self, x, texts=None, return_similarity=False):
         # 🎯 기존 SoftVQ 처리
