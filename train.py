@@ -14,6 +14,10 @@ from tokenizer import SoftVQModel, ModelArgs
 from contrastive_losses import PerceptualLoss, CombinedLoss
 from dataloader import create_dataloader
 
+from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+
 def train_epoch(model, dataloader, optimizer_g, optimizer_d, device, epoch, loss_fn, log_interval=50, global_step_start=0):
     """한 에폭 학습 + wandb 로깅"""
     model.train()
@@ -112,8 +116,19 @@ def train_epoch(model, dataloader, optimizer_g, optimizer_d, device, epoch, loss
 
     return avg_metrics, global_step
 
+def tensor_to_image(tensor):
+    """Tensor를 PIL Image로 변환"""
+    # [0,1] 범위로 클램핑
+    tensor = (tensor + 1.0) / 2.0
+    tensor = torch.clamp(tensor, 0, 1)
+    # CPU로 이동 후 numpy 변환
+    if tensor.is_cuda:
+        tensor = tensor.cpu()
+    image_np = tensor.permute(1, 2, 0).numpy()
+    image_np = (image_np * 255).astype(np.uint8)
+    return Image.fromarray(image_np)
 
-def evaluate_model(model, dataloader, device, loss_fn, epoch=None, global_step=None):
+def evaluate_model(model, dataloader, device, loss_fn, epoch=None, global_step=None, date=None):
     """검증 + wandb 로깅"""
     model.eval()
     loss_fn.discriminator.eval()
@@ -152,6 +167,38 @@ def evaluate_model(model, dataloader, device, loss_fn, epoch=None, global_step=N
     else:
         wandb.log(payload)
 
+    
+    save_dir = f'./checkpoints/{date}/{epoch}/'
+    os.makedirs(save_dir, exist_ok=True)
+    
+    with torch.no_grad():
+        for i, (images, texts) in enumerate(dataloader):
+            if i >= 6:
+                break
+            
+            images = images.to(device)
+
+            output = model(images, None)
+            reconstructed = output['reconstructed']
+            
+            original_pil = tensor_to_image(images[0])
+            reconstructed_pil = tensor_to_image(reconstructed[0])
+            
+            # 비교 이미지 생성
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            
+            axes[0].imshow(original_pil)
+            axes[0].set_title('Original')
+            axes[0].axis('off')
+            
+            axes[1].imshow(reconstructed_pil)
+            axes[1].set_title(f'Reconstructed')
+            axes[1].axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(save_dir + f'comparison_{i+1:02d}.png', dpi=150, bbox_inches='tight')
+            plt.close()
+    
     return avg_metrics
 
 
@@ -159,19 +206,23 @@ def main():
     date = datetime.strftime(datetime.now(), '%Y%m%d_%H:%M:%S')
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--lr_g', type=float, default=1e-4, help='Generator learning rate (TTUR)')
     parser.add_argument('--lr_d', type=float, default=4e-4, help='Discriminator learning rate (TTUR - usually 4x generator)')
     parser.add_argument('--dataset_size', type=int, default=1000)
     parser.add_argument('--save_dir', type=str, default=f'./checkpoints/{date}')
-    parser.add_argument('--log_interval', type=int, default=100)
+    parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--wandb_project', type=str, default='PILC')
     parser.add_argument('--wandb_run_name', type=str, default='base')
     parser.add_argument('--wandb_entity', type=str, default='medicalissues')
     parser.add_argument('--device', type=str, default='cuda:2')  # 'cuda', 'cuda:1', 'cpu' 등
     
-    parser.add_argument('--disc_start', type=int, default=0, help='Discriminator 시작 step')
-    parser.add_argument('--disc_weight', type=float, default=1.0, help='Discriminator loss weight')
+    parser.add_argument('--codebook_size', type=int, default='16384')
+    parser.add_argument('--embed_dim', type=int, default='64')
+    parser.add_argument('--latent_tokens', type=int, default='32')
+    
+    parser.add_argument('--disc_start', type=int, default=15000, help='Discriminator 시작 step')
+    parser.add_argument('--disc_weight', type=float, default=0.2, help='Discriminator loss weight')
     parser.add_argument('--lecam_loss_weight', type=float, default=0.001, help='LeCAM loss weight')
     parser.add_argument('--disc_cr_loss_weight', type=float, default=1.0, help='Discriminator consistency regularization weight')
     args = parser.parse_args()
@@ -196,9 +247,9 @@ def main():
     # 모델 생성
     model_args = ModelArgs(
         image_size=256,
-        codebook_size=16384,
-        codebook_embed_dim=64,
-        num_latent_tokens=32,
+        codebook_size=args.codebook_size,
+        codebook_embed_dim=args.embed_dim,
+        num_latent_tokens=args.latent_tokens,
         enc_type='vit',
         encoder_model='vit_small_patch14_dinov2.lvd142m',
         dec_type='vit',
@@ -233,8 +284,8 @@ def main():
 
     loss_fn = CombinedLoss(
         rec_weight=1.0,
-        contrastive_weight=0.1,
-        perceptual_weight=2.0,
+        contrastive_weight=0.02,
+        perceptual_weight=1.0,
         perceptual_loss=perceptual_loss,
         lecam_loss_weight=args.lecam_loss_weight,
         disc_start=args.disc_start,
@@ -280,7 +331,7 @@ def main():
 
         # Val
         val_metrics = evaluate_model(
-            model, val_loader, device, loss_fn, epoch=epoch, global_step=global_step
+            model, val_loader, device, loss_fn, epoch=epoch, global_step=global_step, date=date
         )
 
         # 콘솔 요약

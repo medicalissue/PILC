@@ -166,6 +166,11 @@ class CombinedLoss(nn.Module):
                 logit_scale_param=logit_scale_param
         )
         
+        perceptual_warmup = 10000
+        if global_step < perceptual_warmup:
+            self.perceptual_weight = (global_step / perceptual_warmup) * self.perceptual_weight
+        else:
+            self.perceptual_weight = self.perceptual_weight
         # 3) perceptual loss
         percep_loss = self.perceptual_loss(target_images, model_output["reconstructed"])
         percep_loss = torch.mean(percep_loss)

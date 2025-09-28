@@ -1,0 +1,20 @@
+SoftVQ-VAE Pure Image Reconstruction Test Results
+==================================================
+Checkpoint: checkpoints/checkpoint_epoch_10.pth
+Samples: 10
+Average MSE: 0.071970
+Average PSNR: 11.53 dB
+Average L1: 0.207034
+
+Individual Results:
+--------------------
+Sample  1: MSE=0.091474, PSNR= 10.4dB, L1=0.238686
+Sample  2: MSE=0.057619, PSNR= 12.4dB, L1=0.189253
+Sample  3: MSE=0.071627, PSNR= 11.4dB, L1=0.214130
+Sample  4: MSE=0.068995, PSNR= 11.6dB, L1=0.213127
+Sample  5: MSE=0.060408, PSNR= 12.2dB, L1=0.167165
+Sample  6: MSE=0.098043, PSNR= 10.1dB, L1=0.230308
+Sample  7: MSE=0.059579, PSNR= 12.2dB, L1=0.193433
+Sample  8: MSE=0.095028, PSNR= 10.2dB, L1=0.246860
+Sample  9: MSE=0.057182, PSNR= 12.4dB, L1=0.188356
+Sample 10: MSE=0.059743, PSNR= 12.2dB, L1=0.189020

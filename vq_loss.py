@@ -66,7 +66,7 @@ def lecam_reg(real_pred, fake_pred, lecam_ema):
 class VQLoss(nn.Module):
     def __init__(self, disc_start, disc_loss="hinge", disc_dim=64, disc_type='patchgan', image_size=256,
                  disc_num_layers=3, disc_in_channels=3, disc_weight=1.0, disc_adaptive_weight = False,
-                 gen_adv_loss='hinge', 
+                 gen_adv_loss='hinge',
                  reconstruction_loss='l2', reconstruction_weight=1.0, codebook_weight=1.0, 
                  perceptual_loss='vgg', perceptual_weight=1.0, perceptual_model='vgg', perceptual_intermediate_loss=False, perceptural_logit_loss=False, perceptual_resize=False, perceptual_dino_variants='depth12_no_train', perceptual_warmup=None,
                  lecam_loss_weight=None,
